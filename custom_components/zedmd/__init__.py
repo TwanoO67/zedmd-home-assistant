@@ -13,7 +13,9 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import (
     CONF_HOST,
+    CONF_HTTP_PORT,
     CONF_STREAM_PORT,
+    DEFAULT_HTTP_PORT,
     DOMAIN,
     SERVICE_CLEAR_SCREEN,
     SERVICE_DISPLAY_TEXT,
@@ -66,6 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass=hass,
         host=entry.data[CONF_HOST],
         stream_port=entry.data[CONF_STREAM_PORT],
+        http_port=entry.data.get(CONF_HTTP_PORT, DEFAULT_HTTP_PORT),
     )
 
     connected = await coordinator.async_connect()

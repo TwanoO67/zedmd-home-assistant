@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Optional
 
+import aiohttp
 from homeassistant.core import HomeAssistant
 
 from .const import (
@@ -15,12 +16,12 @@ from .const import (
     CMD_CLEAR,
     CMD_KEEP_ALIVE,
     CMD_RGB888,
+    DEFAULT_HTTP_PORT,
     DISPLAY_HEIGHT,
     DISPLAY_WIDTH,
     FRAME_SIZE,
     KEEP_ALIVE_INTERVAL,
     MAX_CHUNK_SIZE,
-    ZEDMD_ACK,
     ZEDMD_CTRL_HEADER,
     ZEDMD_FRAME_HEADER,
 )
@@ -50,10 +51,12 @@ class ZeDMDCoordinator:
         hass: HomeAssistant,
         host: str,
         stream_port: int,
+        http_port: int = DEFAULT_HTTP_PORT,
     ) -> None:
         self.hass = hass
         self.host = host
-        self.stream_port = stream_port
+        self.stream_port = stream_port  # may be updated by HTTP handshake
+        self.http_port = http_port
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -63,6 +66,7 @@ class ZeDMDCoordinator:
 
         self.brightness: int = BRIGHTNESS_DEFAULT  # device range 0–15
         self.firmware_version: str = "unknown"
+        self.transport: str = "TCP"
         self._state: str = "idle"  # idle | playing | paused
 
     # ── Public properties ─────────────────────────────────────────────────
@@ -90,46 +94,21 @@ class ZeDMDCoordinator:
 
     # ── Low-level I/O ─────────────────────────────────────────────────────
 
-    async def _wait_ack(self, timeout: float = 2.0) -> bool:
-        """Wait for the 6-byte device ACK (b'ZeDMDA')."""
-        try:
-            ack = await asyncio.wait_for(self._reader.readexactly(6), timeout=timeout)
-            if ack == ZEDMD_ACK:
-                return True
-            # Tolerate partial / shorter ACKs (some WiFi firmware variants
-            # send only b"A"; drain whatever arrived and accept it).
-            if b"A" in ack:
-                _LOGGER.debug("ZeDMD: non-standard ACK %r (accepted)", ack)
-                return True
-            _LOGGER.warning("ZeDMD: unexpected ACK bytes %r", ack)
-            return False
-        except asyncio.IncompleteReadError as ex:
-            _LOGGER.warning("ZeDMD: incomplete ACK (%d bytes)", len(ex.partial))
-            return False
-        except asyncio.TimeoutError:
-            _LOGGER.warning("ZeDMD: ACK timeout")
-            return False
-
     async def _send_command(self, command: int, data: bytes = b"") -> bool:
-        """Send a logical packet as chunked physical writes with per-chunk ACK."""
+        """Send a logical packet over TCP (no ACK – WiFi/TCP firmware is fire-and-forget).
+
+        The libzedmd ACK mechanism only exists on the serial transport.
+        Over TCP, reliability is guaranteed by the transport layer itself.
+        """
         if not self.connected:
             _LOGGER.error("ZeDMD: not connected – cannot send command 0x%02X", command)
             return False
 
         packet = self._build_packet(command, data)
-        offset = 0
 
         try:
-            while offset < len(packet):
-                chunk = packet[offset : offset + MAX_CHUNK_SIZE]
-                self._writer.write(chunk)
-                await self._writer.drain()
-                if not await self._wait_ack():
-                    _LOGGER.error(
-                        "ZeDMD: ACK failure at offset %d / %d", offset, len(packet)
-                    )
-                    return False
-                offset += MAX_CHUNK_SIZE
+            self._writer.write(packet)
+            await self._writer.drain()
             return True
 
         except (ConnectionResetError, BrokenPipeError, OSError) as ex:
@@ -137,17 +116,83 @@ class ZeDMDCoordinator:
             await self._do_disconnect()
             return False
 
+    # ── HTTP handshake ────────────────────────────────────────────────────
+
+    async def _http_handshake(self) -> bool:
+        """GET http://<host>:<http_port>/handshake and parse pipe-delimited response.
+
+        Response format (21 pipe-separated fields, ZeDMDWiFi.cpp):
+          0:width | 1:height | 2:fw_version | 3:s3 | 4:protocol(TCP/UDP)
+          5:stream_port | 6:udp_delay | 7:write_at_once | 8:brightness
+          9:rgb_mode | 10:clkphase | 11:driver | 12:i2s_speed
+          13:latch_blanking | 14:min_refresh | 15:y_offset | 16:ssid
+          17:half | 18:device_id | 19:power | 20:device_type
+        """
+        url = f"http://{self.host}:{self.http_port}/handshake"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning(
+                            "ZeDMD: HTTP handshake returned status %d", resp.status
+                        )
+                        return False
+                    body = await resp.text()
+
+            # Strip HTTP headers if raw response (some firmware variants)
+            if "\r\n\r\n" in body:
+                body = body.split("\r\n\r\n", 1)[1]
+            body = body.strip()
+
+            fields = body.split("|")
+            _LOGGER.debug("ZeDMD: handshake fields %s", fields)
+
+            if len(fields) > 2:
+                self.firmware_version = fields[2] if len(fields) > 2 else "unknown"
+            if len(fields) > 4:
+                self.transport = fields[4].strip().upper()  # "TCP" or "UDP"
+            if len(fields) > 5 and fields[5].strip().isdigit():
+                self.stream_port = int(fields[5].strip())
+            if len(fields) > 8 and fields[8].strip().isdigit():
+                self.brightness = int(fields[8].strip())
+
+            _LOGGER.info(
+                "ZeDMD: handshake OK – fw=%s transport=%s stream_port=%d",
+                self.firmware_version, self.transport, self.stream_port,
+            )
+            return True
+
+        except aiohttp.ClientError as ex:
+            _LOGGER.warning("ZeDMD: HTTP handshake failed: %s", ex)
+            return False
+        except Exception as ex:
+            _LOGGER.warning("ZeDMD: HTTP handshake unexpected error: %s", ex)
+            return False
+
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def async_connect(self) -> bool:
-        """Open the TCP connection to the ZeDMD stream port."""
+        """HTTP handshake then open the TCP streaming connection."""
+        # Step 1 – HTTP handshake (updates stream_port, firmware version, etc.)
+        await self._http_handshake()  # non-fatal if it fails
+
+        if self.transport == "UDP":
+            _LOGGER.error(
+                "ZeDMD: device is in UDP mode – this integration requires TCP. "
+                "Change the transport in the ZeDMD firmware settings."
+            )
+            return False
+
+        # Step 2 – TCP streaming socket
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.stream_port),
                 timeout=5.0,
             )
             _LOGGER.info(
-                "ZeDMD: connected to %s:%d", self.host, self.stream_port
+                "ZeDMD: TCP connected to %s:%d", self.host, self.stream_port
             )
             self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
             self._state = "idle"
