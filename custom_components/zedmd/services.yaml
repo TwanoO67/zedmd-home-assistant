@@ -78,3 +78,26 @@ clear_screen:
     entity:
       integration: zedmd
       domain: media_player
+
+test_pattern:
+  name: Test Pattern
+  description: >
+    Send a solid-colour frame (no text rendering). Use this to verify
+    that the TCP connection and protocol are working correctly.
+  target:
+    entity:
+      integration: zedmd
+      domain: media_player
+  fields:
+    color:
+      name: Colour
+      description: Solid colour to fill the display.
+      required: false
+      default: red
+      selector:
+        select:
+          options:
+            - red
+            - green
+            - blue
+            - white

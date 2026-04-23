@@ -105,6 +105,10 @@ class ZeDMDCoordinator:
             return False
 
         packet = self._build_packet(command, data)
+        _LOGGER.debug(
+            "ZeDMD: sending cmd=0x%02X payload=%d bytes  header=%s",
+            command, len(data), packet[:14].hex(),
+        )
 
         try:
             self._writer.write(packet)
@@ -115,6 +119,19 @@ class ZeDMDCoordinator:
             _LOGGER.error("ZeDMD: connection lost during send: %s", ex)
             await self._do_disconnect()
             return False
+
+    async def async_send_test_pattern(self, r: int = 255, g: int = 0, b: int = 0) -> bool:
+        """Send a solid-colour test frame (no PIL). Use for protocol debugging.
+
+        Default: all-red.  Call with r=0,g=255,b=0 for green, etc.
+        """
+        frame = bytes([r, g, b] * (DISPLAY_WIDTH * DISPLAY_HEIGHT))
+        _LOGGER.info(
+            "ZeDMD: sending test pattern RGB(%d,%d,%d) – %d bytes",
+            r, g, b, len(frame),
+        )
+        async with self._lock:
+            return await self._send_command(CMD_RGB888, frame)
 
     # ── HTTP handshake ────────────────────────────────────────────────────
 

@@ -20,6 +20,7 @@ from .const import (
     SERVICE_CLEAR_SCREEN,
     SERVICE_DISPLAY_TEXT,
     SERVICE_SET_BRIGHTNESS,
+    SERVICE_TEST_PATTERN,
 )
 from .coordinator import ZeDMDCoordinator
 
@@ -119,6 +120,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             for coord in _get_coordinator(call):
                 await coord.async_stop()
 
+        async def handle_test_pattern(call: ServiceCall) -> None:
+            color = call.data.get("color", "red")
+            presets = {
+                "red":   (255, 0,   0),
+                "green": (0,   255, 0),
+                "blue":  (0,   0,   255),
+                "white": (255, 255, 255),
+            }
+            r, g, b = presets.get(color, (255, 0, 0))
+            for coord in _get_coordinator(call):
+                await coord.async_send_test_pattern(r, g, b)
+
         hass.services.async_register(
             DOMAIN,
             SERVICE_DISPLAY_TEXT,
@@ -130,6 +143,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_SET_BRIGHTNESS,
             handle_set_brightness,
             schema=SERVICE_BRIGHTNESS_SCHEMA,
+        )
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_TEST_PATTERN,
+            handle_test_pattern,
+            schema=vol.Schema({
+                vol.Optional("entity_id"): vol.Any(str, list),
+                vol.Optional("color", default="red"): vol.In(["red", "green", "blue", "white"]),
+            }),
         )
         hass.services.async_register(
             DOMAIN,
@@ -154,5 +176,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, SERVICE_DISPLAY_TEXT)
             hass.services.async_remove(DOMAIN, SERVICE_SET_BRIGHTNESS)
             hass.services.async_remove(DOMAIN, SERVICE_CLEAR_SCREEN)
+            hass.services.async_remove(DOMAIN, SERVICE_TEST_PATTERN)
 
     return unload_ok

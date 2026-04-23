@@ -51,3 +51,4 @@ BRIGHTNESS_DEFAULT = 2
 SERVICE_DISPLAY_TEXT   = "display_text"
 SERVICE_SET_BRIGHTNESS = "set_brightness"
 SERVICE_CLEAR_SCREEN   = "clear_screen"
+SERVICE_TEST_PATTERN   = "test_pattern"
