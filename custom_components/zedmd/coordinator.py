@@ -1,0 +1,375 @@
+"""ZeDMD coordinator: TCP connection + protocol + text rendering."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Optional
+
+from homeassistant.core import HomeAssistant
+
+from .const import (
+    BRIGHTNESS_DEFAULT,
+    BRIGHTNESS_MAX,
+    CMD_BRIGHTNESS,
+    CMD_CLEAR,
+    CMD_KEEP_ALIVE,
+    CMD_RGB888,
+    DISPLAY_HEIGHT,
+    DISPLAY_WIDTH,
+    FRAME_SIZE,
+    KEEP_ALIVE_INTERVAL,
+    MAX_CHUNK_SIZE,
+    ZEDMD_ACK,
+    ZEDMD_CTRL_HEADER,
+    ZEDMD_FRAME_HEADER,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    """Convert '#RRGGBB' or 'RRGGBB' to (R, G, B)."""
+    value = value.strip().lstrip("#")
+    r, g, b = int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    return r, g, b
+
+
+class ZeDMDCoordinator:
+    """Manages the ZeDMD TCP connection, protocol framing, and text rendering.
+
+    Protocol notes (libzedmd 5.x, ZeDMDComm.h / ZeDMDWiFi.cpp):
+      • Logical packet  = FRAME_HEADER(5) + CTRL_HEADER(5) + cmd(1)
+                          + size_hi(1) + size_lo(1) + 0x00(1) + payload
+      • The full packet bytes are split into physical chunks ≤ MAX_CHUNK_SIZE.
+      • After each physical chunk the device replies with 6 bytes b"ZeDMDA".
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        stream_port: int,
+    ) -> None:
+        self.hass = hass
+        self.host = host
+        self.stream_port = stream_port
+
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
+        self._lock = asyncio.Lock()
+        self._keep_alive_task: Optional[asyncio.Task] = None
+        self._current_task: Optional[asyncio.Task] = None
+
+        self.brightness: int = BRIGHTNESS_DEFAULT  # device range 0–15
+        self.firmware_version: str = "unknown"
+        self._state: str = "idle"  # idle | playing | paused
+
+    # ── Public properties ─────────────────────────────────────────────────
+
+    @property
+    def connected(self) -> bool:
+        return self._writer is not None and not self._writer.is_closing()
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    # ── Packet construction ───────────────────────────────────────────────
+
+    @staticmethod
+    def _build_packet(command: int, data: bytes = b"") -> bytes:
+        """Assemble a logical ZeDMD packet (not yet chunked)."""
+        size = len(data)
+        return (
+            ZEDMD_FRAME_HEADER
+            + ZEDMD_CTRL_HEADER
+            + bytes([command, (size >> 8) & 0xFF, size & 0xFF, 0x00])
+            + data
+        )
+
+    # ── Low-level I/O ─────────────────────────────────────────────────────
+
+    async def _wait_ack(self, timeout: float = 2.0) -> bool:
+        """Wait for the 6-byte device ACK (b'ZeDMDA')."""
+        try:
+            ack = await asyncio.wait_for(self._reader.readexactly(6), timeout=timeout)
+            if ack == ZEDMD_ACK:
+                return True
+            # Tolerate partial / shorter ACKs (some WiFi firmware variants
+            # send only b"A"; drain whatever arrived and accept it).
+            if b"A" in ack:
+                _LOGGER.debug("ZeDMD: non-standard ACK %r (accepted)", ack)
+                return True
+            _LOGGER.warning("ZeDMD: unexpected ACK bytes %r", ack)
+            return False
+        except asyncio.IncompleteReadError as ex:
+            _LOGGER.warning("ZeDMD: incomplete ACK (%d bytes)", len(ex.partial))
+            return False
+        except asyncio.TimeoutError:
+            _LOGGER.warning("ZeDMD: ACK timeout")
+            return False
+
+    async def _send_command(self, command: int, data: bytes = b"") -> bool:
+        """Send a logical packet as chunked physical writes with per-chunk ACK."""
+        if not self.connected:
+            _LOGGER.error("ZeDMD: not connected – cannot send command 0x%02X", command)
+            return False
+
+        packet = self._build_packet(command, data)
+        offset = 0
+
+        try:
+            while offset < len(packet):
+                chunk = packet[offset : offset + MAX_CHUNK_SIZE]
+                self._writer.write(chunk)
+                await self._writer.drain()
+                if not await self._wait_ack():
+                    _LOGGER.error(
+                        "ZeDMD: ACK failure at offset %d / %d", offset, len(packet)
+                    )
+                    return False
+                offset += MAX_CHUNK_SIZE
+            return True
+
+        except (ConnectionResetError, BrokenPipeError, OSError) as ex:
+            _LOGGER.error("ZeDMD: connection lost during send: %s", ex)
+            await self._do_disconnect()
+            return False
+
+    # ── Connection lifecycle ──────────────────────────────────────────────
+
+    async def async_connect(self) -> bool:
+        """Open the TCP connection to the ZeDMD stream port."""
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.stream_port),
+                timeout=5.0,
+            )
+            _LOGGER.info(
+                "ZeDMD: connected to %s:%d", self.host, self.stream_port
+            )
+            self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+            self._state = "idle"
+            return True
+
+        except (OSError, asyncio.TimeoutError) as ex:
+            _LOGGER.error(
+                "ZeDMD: TCP connect to %s:%d failed: %s",
+                self.host, self.stream_port, ex,
+            )
+            self._reader = None
+            self._writer = None
+            return False
+
+    async def _do_disconnect(self) -> None:
+        """Internal disconnect (cancels tasks, closes socket)."""
+        self._state = "idle"
+
+        if self._keep_alive_task:
+            self._keep_alive_task.cancel()
+            self._keep_alive_task = None
+
+        if self._current_task:
+            self._current_task.cancel()
+            self._current_task = None
+
+        if self._writer:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:
+                pass
+            self._writer = None
+            self._reader = None
+
+    async def async_disconnect(self) -> None:
+        """Public disconnect called by HA on unload."""
+        await self._do_disconnect()
+
+    # ── Keep-alive ────────────────────────────────────────────────────────
+
+    async def _keep_alive_loop(self) -> None:
+        """Send CMD_KEEP_ALIVE every KEEP_ALIVE_INTERVAL seconds."""
+        while True:
+            await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+            if not self.connected:
+                break
+            async with self._lock:
+                try:
+                    packet = self._build_packet(CMD_KEEP_ALIVE)
+                    self._writer.write(packet)
+                    await self._writer.drain()
+                    # Keep-alive expects no ACK from the device.
+                except Exception as ex:
+                    _LOGGER.debug("ZeDMD: keep-alive write error: %s", ex)
+
+    # ── Display commands ──────────────────────────────────────────────────
+
+    async def async_clear_screen(self) -> bool:
+        """Blank the display."""
+        async with self._lock:
+            return await self._send_command(CMD_CLEAR)
+
+    async def async_set_brightness(self, percent: int) -> bool:
+        """Set brightness.  percent: 0–100 → device range 0–15."""
+        level = round(percent / 100.0 * BRIGHTNESS_MAX)
+        level = max(0, min(BRIGHTNESS_MAX, level))
+        self.brightness = level
+        async with self._lock:
+            return await self._send_command(CMD_BRIGHTNESS, bytes([level]))
+
+    async def async_send_frame(self, rgb_data: bytes) -> bool:
+        """Send a raw RGB888 frame (DISPLAY_WIDTH × DISPLAY_HEIGHT × 3 bytes)."""
+        if len(rgb_data) != FRAME_SIZE:
+            _LOGGER.error(
+                "ZeDMD: wrong frame size %d (expected %d)", len(rgb_data), FRAME_SIZE
+            )
+            return False
+        async with self._lock:
+            return await self._send_command(CMD_RGB888, rgb_data)
+
+    # ── Text rendering ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _render_frame(
+        text: str,
+        font,
+        color: tuple[int, int, int],
+        bg_color: tuple[int, int, int],
+        x_offset: int,
+    ) -> bytes:
+        """Draw *text* at (x_offset, centred_y) into a 128×32 RGB image."""
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (DISPLAY_WIDTH, DISPLAY_HEIGHT), bg_color)
+        draw = ImageDraw.Draw(img)
+
+        # Vertical centre using font metrics
+        try:
+            bbox = font.getbbox("A")
+            font_height = bbox[3] - bbox[1]
+        except AttributeError:
+            font_height = 10  # fallback for old Pillow
+
+        y = max(0, (DISPLAY_HEIGHT - font_height) // 2)
+        draw.text((x_offset, y), text, font=font, fill=color)
+        return img.tobytes()  # RGB888
+
+    @staticmethod
+    def _load_font(size: int = 20):
+        """Load the best available PIL font at *size* pixels."""
+        from PIL import ImageFont
+
+        # 1) Try system TrueType fonts common on Linux (HA OS)
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+        for path in candidates:
+            try:
+                return ImageFont.truetype(path, size)
+            except (IOError, OSError):
+                pass
+
+        # 2) PIL built-in scalable default (Pillow ≥ 9.2.0)
+        try:
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            pass
+
+        # 3) Oldest fallback – tiny bitmap font
+        return ImageFont.load_default()
+
+    async def async_display_text(
+        self,
+        text: str,
+        color: str | tuple = "#FFFFFF",
+        bg_color: str | tuple = "#000000",
+        scroll: bool = True,
+        scroll_speed: int = 2,
+        fps: int = 20,
+    ) -> None:
+        """Render *text* on the display.
+
+        If *scroll* is True and the text is wider than the panel the text will
+        continuously scroll right-to-left until stopped.
+        """
+        # Normalise colour arguments
+        if isinstance(color, str):
+            color = _hex_to_rgb(color)
+        if isinstance(bg_color, str):
+            bg_color = _hex_to_rgb(bg_color)
+
+        font = await self.hass.async_add_executor_job(self._load_font, 20)
+
+        # Measure text width in a throw-away image
+        from PIL import Image, ImageDraw
+
+        def _measure(txt: str) -> int:
+            tmp = Image.new("RGB", (4096, DISPLAY_HEIGHT))
+            d = ImageDraw.Draw(tmp)
+            bbox = d.textbbox((0, 0), txt, font=font)
+            return bbox[2] - bbox[0]
+
+        text_width = await self.hass.async_add_executor_job(_measure, text)
+
+        if not scroll or text_width <= DISPLAY_WIDTH - 4:
+            # ── Static display ─────────────────────────────────────────────
+            frame = await self.hass.async_add_executor_job(
+                self._render_frame, text, font, color, bg_color, 4
+            )
+            self._state = "playing"
+            await self.async_send_frame(frame)
+            return
+
+        # ── Scrolling loop (background task) ──────────────────────────────
+        async def _scroll_loop() -> None:
+            self._state = "playing"
+            x = DISPLAY_WIDTH
+            interval = 1.0 / fps
+
+            try:
+                while self._state == "playing":
+                    frame = await self.hass.async_add_executor_job(
+                        self._render_frame, text, font, color, bg_color, x
+                    )
+                    if not await self.async_send_frame(frame):
+                        break
+
+                    x -= scroll_speed
+                    if x < -(text_width + 10):
+                        x = DISPLAY_WIDTH  # restart from right
+
+                    await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if self._state == "playing":
+                    self._state = "idle"
+
+        # Cancel any previous task first (lock not held here on purpose)
+        if self._current_task:
+            self._current_task.cancel()
+        self._current_task = asyncio.create_task(_scroll_loop())
+
+    async def async_stop(self) -> None:
+        """Stop current playback and clear the screen."""
+        self._state = "idle"
+        if self._current_task:
+            self._current_task.cancel()
+            self._current_task = None
+        await self.async_clear_screen()
+
+    async def async_pause(self) -> None:
+        """Pause scrolling (freeze current frame)."""
+        if self._state == "playing":
+            self._state = "paused"
+            if self._current_task:
+                self._current_task.cancel()
+                self._current_task = None
+
+    async def async_resume(self) -> None:
+        """Resume – not implemented for text; re-display last content."""
+        self._state = "idle"

@@ -1,0 +1,80 @@
+display_text:
+  name: Display Text
+  description: >
+    Render text on the ZeDMD LED matrix. Long text will automatically scroll
+    right-to-left unless scroll is set to false.
+  target:
+    entity:
+      integration: zedmd
+      domain: media_player
+  fields:
+    text:
+      name: Text
+      description: The text to display on the matrix.
+      required: true
+      example: "Hello ZeDMD!"
+      selector:
+        text:
+    color:
+      name: Text colour
+      description: Foreground colour in #RRGGBB format.
+      required: false
+      default: "#FFFFFF"
+      example: "#FF8800"
+      selector:
+        text:
+    bg_color:
+      name: Background colour
+      description: Background colour in #RRGGBB format.
+      required: false
+      default: "#000000"
+      example: "#000033"
+      selector:
+        text:
+    scroll:
+      name: Scroll
+      description: Scroll the text when it is wider than the display (128 px).
+      required: false
+      default: true
+      selector:
+        boolean:
+    scroll_speed:
+      name: Scroll speed
+      description: Pixels shifted per frame (1–20). Higher = faster.
+      required: false
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+          mode: slider
+
+set_brightness:
+  name: Set Brightness
+  description: Set the display brightness (0 = off, 100 = maximum).
+  target:
+    entity:
+      integration: zedmd
+      domain: media_player
+  fields:
+    brightness:
+      name: Brightness
+      description: Brightness level from 0 to 100 %.
+      required: true
+      example: 75
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+clear_screen:
+  name: Clear Screen
+  description: Stop current playback and blank the ZeDMD display.
+  target:
+    entity:
+      integration: zedmd
+      domain: media_player

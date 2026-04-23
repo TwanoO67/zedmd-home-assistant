@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connexion à ZeDMD",
+        "description": "Saisissez les paramètres réseau de votre ZeDMD.",
+        "data": {
+          "host": "Adresse IP ou nom d'hôte",
+          "stream_port": "Port TCP de streaming",
+          "http_port": "Port HTTP (informations appareil)",
+          "name": "Nom de l'appareil"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter à l'appareil. Vérifiez l'adresse IP et le port."
+    },
+    "abort": {
+      "already_configured": "Cet appareil est déjà configuré."
+    }
+  },
+  "services": {
+    "display_text": {
+      "name": "Afficher du texte",
+      "description": "Affiche du texte sur la matrice LED ZeDMD.",
+      "fields": {
+        "text": { "name": "Texte", "description": "Texte à afficher." },
+        "color": { "name": "Couleur du texte", "description": "Couleur de premier plan (#RRGGBB)." },
+        "bg_color": { "name": "Arrière-plan", "description": "Couleur de fond (#RRGGBB)." },
+        "scroll": { "name": "Défilement", "description": "Faire défiler le texte s'il est plus large que l'écran." },
+        "scroll_speed": { "name": "Vitesse de défilement", "description": "Pixels par image (1–20)." }
+      }
+    },
+    "set_brightness": {
+      "name": "Régler la luminosité",
+      "description": "Règle la luminosité de l'affichage (0–100 %).",
+      "fields": {
+        "brightness": { "name": "Luminosité", "description": "Niveau de luminosité 0–100." }
+      }
+    },
+    "clear_screen": {
+      "name": "Effacer l'écran",
+      "description": "Arrête la lecture et efface l'affichage."
+    }
+  }
+}

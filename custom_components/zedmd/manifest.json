@@ -1,0 +1,12 @@
+{
+  "domain": "zedmd",
+  "name": "ZeDMD",
+  "version": "1.0.0",
+  "documentation": "https://github.com/PPUC/libzedmd",
+  "requirements": ["Pillow>=9.2.0"],
+  "dependencies": [],
+  "codeowners": [],
+  "config_flow": true,
+  "iot_class": "local_push",
+  "integration_type": "device"
+}

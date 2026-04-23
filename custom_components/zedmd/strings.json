@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to ZeDMD",
+        "description": "Enter the network details of your ZeDMD device.",
+        "data": {
+          "host": "IP address or hostname",
+          "stream_port": "TCP streaming port",
+          "http_port": "HTTP port (for device info)",
+          "name": "Device name"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the device. Check the IP address and port."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "services": {
+    "display_text": {
+      "name": "Display Text",
+      "description": "Render text on the ZeDMD LED matrix.",
+      "fields": {
+        "text": { "name": "Text", "description": "Text to display." },
+        "color": { "name": "Text colour", "description": "Foreground colour (#RRGGBB)." },
+        "bg_color": { "name": "Background", "description": "Background colour (#RRGGBB)." },
+        "scroll": { "name": "Scroll", "description": "Scroll text when wider than the display." },
+        "scroll_speed": { "name": "Scroll speed", "description": "Pixels per frame (1–20)." }
+      }
+    },
+    "set_brightness": {
+      "name": "Set Brightness",
+      "description": "Set the display brightness (0–100 %).",
+      "fields": {
+        "brightness": { "name": "Brightness", "description": "Brightness level 0–100." }
+      }
+    },
+    "clear_screen": {
+      "name": "Clear Screen",
+      "description": "Stop playback and blank the display."
+    }
+  }
+}
