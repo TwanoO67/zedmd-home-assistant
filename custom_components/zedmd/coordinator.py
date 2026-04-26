@@ -16,7 +16,7 @@ from .const import (
     CMD_CLEAR,
     CMD_KEEP_ALIVE,
     CMD_RENDER,
-    CMD_RGB888_ZONES,
+    CMD_RGB565_ZONES,
     DEFAULT_HTTP_PORT,
     DEVICE_BUFFER_SIZE,
     DISPLAY_HEIGHT,
@@ -26,13 +26,13 @@ from .const import (
     TOTAL_ZONES,
     ZEDMD_CTRL_HEADER,
     ZEDMD_FRAME_HEADER,
-    ZONE_BYTES,
+    ZONE_BYTES_565,
     ZONE_HEIGHT,
     ZONE_WIDTH,
     ZONES_PER_ROW,
 )
 
-_BLACK_ZONE = b"\x00" * ZONE_BYTES
+_BLACK_ZONE_565 = b"\x00" * ZONE_BYTES_565
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -343,27 +343,38 @@ class ZeDMDCoordinator:
 
     @staticmethod
     def _build_zone_packets(rgb_data: bytes) -> list[bytes]:
-        """Split a full RGB888 frame into zone-stream payloads.
+        """Convert RGB888 frame to RGB565 zones, packed for the firmware.
 
-        Firmware (case 4) expects payload = concatenation of zone entries:
-          - non-black zone: 1 byte zone_idx (0..127) + ZONE_BYTES pixel data
+        Firmware case 5 (RGB565 Zones Stream) expects payload =
+        concatenation of zone entries, each:
+          - non-black zone: 1 byte zone_idx (0..127) + ZONE_BYTES_565 pixel data
           - all-black zone: 1 byte (zone_idx | 0x80)   ← optimisation
-        Each payload must fit in DEVICE_BUFFER_SIZE (1152 bytes on stock ESP32).
+
+        RGB565 layout per pixel: 2 bytes little-endian, where
+            pixel = (R5 << 11) | (G6 << 5) | B5
+            byte0 = pixel & 0xFF, byte1 = (pixel >> 8) & 0xFF
+
+        Each payload must fit in DEVICE_BUFFER_SIZE (1152 B on stock ESP32).
         """
         packets: list[bytes] = []
         buf = bytearray()
-        row_bytes = ZONE_WIDTH * 3  # 24 bytes per zone row
         for idx in range(TOTAL_ZONES):
             zx = idx % ZONES_PER_ROW
             zy = idx // ZONES_PER_ROW
-            x_byte = zx * ZONE_WIDTH * 3
-            zone = bytearray(ZONE_BYTES)
+            zone = bytearray(ZONE_BYTES_565)
             out = 0
             for dy in range(ZONE_HEIGHT):
-                src = ((zy * ZONE_HEIGHT + dy) * DISPLAY_WIDTH) * 3 + x_byte
-                zone[out:out + row_bytes] = rgb_data[src:src + row_bytes]
-                out += row_bytes
-            if zone == _BLACK_ZONE:
+                row_start = ((zy * ZONE_HEIGHT + dy) * DISPLAY_WIDTH + zx * ZONE_WIDTH) * 3
+                for dx in range(ZONE_WIDTH):
+                    p = row_start + dx * 3
+                    r = rgb_data[p]
+                    g = rgb_data[p + 1]
+                    b = rgb_data[p + 2]
+                    pixel = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+                    zone[out]     = pixel & 0xFF
+                    zone[out + 1] = (pixel >> 8) & 0xFF
+                    out += 2
+            if zone == _BLACK_ZONE_565:
                 entry = bytes([idx | 0x80])
             else:
                 entry = bytes([idx]) + bytes(zone)
@@ -378,7 +389,9 @@ class ZeDMDCoordinator:
     async def async_send_frame(self, rgb_data: bytes) -> bool:
         """Send a raw RGB888 frame (DISPLAY_WIDTH × DISPLAY_HEIGHT × 3 bytes).
 
-        Wire protocol: one or more CMD_RGB888_ZONES packets, then CMD_RENDER.
+        Wire protocol: one or more CMD_RGB565_ZONES packets, then CMD_RENDER.
+        Frame is converted to RGB565 to be compatible with firmware ≤ 5.x
+        (RGB888 zone stream was only added in firmware 6.0.0).
         """
         if len(rgb_data) != FRAME_SIZE:
             _LOGGER.error(
@@ -390,7 +403,7 @@ class ZeDMDCoordinator:
         )
         async with self._lock:
             for payload in packets:
-                if not await self._send_command(CMD_RGB888_ZONES, payload):
+                if not await self._send_command(CMD_RGB565_ZONES, payload):
                     return False
             return await self._send_command(CMD_RENDER)
 

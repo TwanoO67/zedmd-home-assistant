@@ -25,10 +25,10 @@ ZONE_HEIGHT   = DISPLAY_HEIGHT // 8    # 4 px
 ZONES_PER_ROW = DISPLAY_WIDTH // ZONE_WIDTH    # 16
 ZONES_PER_COL = DISPLAY_HEIGHT // ZONE_HEIGHT  # 8
 TOTAL_ZONES   = ZONES_PER_ROW * ZONES_PER_COL  # 128
-ZONE_BYTES    = ZONE_WIDTH * ZONE_HEIGHT * 3   # 96 bytes RGB888 per zone
+ZONE_BYTES_565 = ZONE_WIDTH * ZONE_HEIGHT * 2  # 64 bytes RGB565 (little-endian) per zone
 
 # Firmware payload buffer size (main.h: BUFFER_SIZE = 1152 on standard ESP32).
-# Each non-black zone entry costs 1 (idx) + ZONE_BYTES; black zones cost 1.
+# Each non-black zone entry costs 1 (idx) + ZONE_BYTES_565; black zones cost 1.
 DEVICE_BUFFER_SIZE = 1152
 
 # ── ZeDMD wire protocol (libzedmd v5.x) ───────────────────────────────────
@@ -45,11 +45,12 @@ ZEDMD_ACK          = b"ZeDMDA" # expected 6-byte ACK  ("ZeDMD" + "A")
 KEEP_ALIVE_INTERVAL = 3.0
 
 # Commands  (ZEDMD_COMM_COMMAND enum from ZeDMDComm.h, matching firmware switch)
+# Firmware ≤5.x only implements case 5 (RGB565). RGB888 (case 4) was added in 6.0.0.
 CMD_HANDSHAKE       = 0x0C
 CMD_CLEAR           = 0x0A
 CMD_KEEP_ALIVE      = 0x0B
-CMD_RGB888_ZONES    = 0x04   # firmware case 4: RGB888 zone stream
-CMD_RENDER          = 0x06   # firmware case 6: render queued zones
+CMD_RGB565_ZONES    = 0x05   # firmware case 5: RGB565 zone stream (universal)
+CMD_RENDER          = 0x06   # firmware case 6: render queued zones (NOP without PSRAM)
 CMD_BRIGHTNESS      = 0x16
 
 # Brightness device range

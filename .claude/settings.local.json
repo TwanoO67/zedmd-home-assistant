@@ -2,8 +2,6 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(curl -s https://raw.githubusercontent.com/PPUC/libzedmd/main/src/ZeDMDComm.cpp)",
-      "Bash(curl -s https://raw.githubusercontent.com/PPUC/libzedmd/main/src/ZeDMDComm.h)",
       "Bash(curl:*)",
       "Bash(gh release:*)",
       "WebFetch(domain:api.github.com)",
@@ -12,7 +10,10 @@
       "WebSearch",
       "Bash(python *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git tag *)",
+      "Bash(git push *)",
+      "Bash(py *)"
     ]
   }
 }
