@@ -6,7 +6,13 @@
       "Bash(curl -s https://raw.githubusercontent.com/PPUC/libzedmd/main/src/ZeDMDComm.h)",
       "Bash(curl:*)",
       "Bash(gh release:*)",
-      "WebFetch(domain:api.github.com)"
+      "WebFetch(domain:api.github.com)",
+      "Bash(mkdir -p /c/temp)",
+      "Read(//c/temp/**)",
+      "WebSearch",
+      "Bash(python *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

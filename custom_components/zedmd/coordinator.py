@@ -15,16 +15,24 @@ from .const import (
     CMD_BRIGHTNESS,
     CMD_CLEAR,
     CMD_KEEP_ALIVE,
-    CMD_RGB888,
+    CMD_RENDER,
+    CMD_RGB888_ZONES,
     DEFAULT_HTTP_PORT,
+    DEVICE_BUFFER_SIZE,
     DISPLAY_HEIGHT,
     DISPLAY_WIDTH,
     FRAME_SIZE,
     KEEP_ALIVE_INTERVAL,
-    MAX_CHUNK_SIZE,
+    TOTAL_ZONES,
     ZEDMD_CTRL_HEADER,
     ZEDMD_FRAME_HEADER,
+    ZONE_BYTES,
+    ZONE_HEIGHT,
+    ZONE_WIDTH,
+    ZONES_PER_ROW,
 )
+
+_BLACK_ZONE = b"\x00" * ZONE_BYTES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,11 +47,13 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
 class ZeDMDCoordinator:
     """Manages the ZeDMD TCP connection, protocol framing, and text rendering.
 
-    Protocol notes (libzedmd 5.x, ZeDMDComm.h / ZeDMDWiFi.cpp):
+    Protocol notes (firmware main.cpp HandleData / libzedmd ZeDMDComm.cpp):
       • Logical packet  = FRAME_HEADER(5) + CTRL_HEADER(5) + cmd(1)
-                          + size_hi(1) + size_lo(1) + 0x00(1) + payload
-      • The full packet bytes are split into physical chunks ≤ MAX_CHUNK_SIZE.
-      • After each physical chunk the device replies with 6 bytes b"ZeDMDA".
+                          + size_hi(1) + size_lo(1) + comp_flag(1) + payload
+      • Frame display = N×CMD_RGB888_ZONES (0x04) packets carrying zone entries,
+        then a single CMD_RENDER (0x06) packet to flip the buffer.
+      • Each payload must fit in the firmware's BUFFER_SIZE (1152 B on ESP32).
+      • Over WiFi/TCP the firmware sends no ACK; reliability is handled by TCP.
     """
 
     def __init__(
@@ -126,13 +136,12 @@ class ZeDMDCoordinator:
 
         Default: all-red.  Call with r=0,g=255,b=0 for green, etc.
         """
-        frame = bytes([r, g, b] * (DISPLAY_WIDTH * DISPLAY_HEIGHT))
+        frame = bytes([r, g, b]) * (DISPLAY_WIDTH * DISPLAY_HEIGHT)
         _LOGGER.info(
             "ZeDMD: sending test pattern RGB(%d,%d,%d) – %d bytes",
             r, g, b, len(frame),
         )
-        async with self._lock:
-            return await self._send_command(CMD_RGB888, frame)
+        return await self.async_send_frame(frame)
 
     # ── HTTP handshake ────────────────────────────────────────────────────
 
@@ -332,15 +341,58 @@ class ZeDMDCoordinator:
         async with self._lock:
             return await self._send_command(CMD_BRIGHTNESS, bytes([level]))
 
+    @staticmethod
+    def _build_zone_packets(rgb_data: bytes) -> list[bytes]:
+        """Split a full RGB888 frame into zone-stream payloads.
+
+        Firmware (case 4) expects payload = concatenation of zone entries:
+          - non-black zone: 1 byte zone_idx (0..127) + ZONE_BYTES pixel data
+          - all-black zone: 1 byte (zone_idx | 0x80)   ← optimisation
+        Each payload must fit in DEVICE_BUFFER_SIZE (1152 bytes on stock ESP32).
+        """
+        packets: list[bytes] = []
+        buf = bytearray()
+        row_bytes = ZONE_WIDTH * 3  # 24 bytes per zone row
+        for idx in range(TOTAL_ZONES):
+            zx = idx % ZONES_PER_ROW
+            zy = idx // ZONES_PER_ROW
+            x_byte = zx * ZONE_WIDTH * 3
+            zone = bytearray(ZONE_BYTES)
+            out = 0
+            for dy in range(ZONE_HEIGHT):
+                src = ((zy * ZONE_HEIGHT + dy) * DISPLAY_WIDTH) * 3 + x_byte
+                zone[out:out + row_bytes] = rgb_data[src:src + row_bytes]
+                out += row_bytes
+            if zone == _BLACK_ZONE:
+                entry = bytes([idx | 0x80])
+            else:
+                entry = bytes([idx]) + bytes(zone)
+            if len(buf) + len(entry) > DEVICE_BUFFER_SIZE:
+                packets.append(bytes(buf))
+                buf = bytearray()
+            buf.extend(entry)
+        if buf:
+            packets.append(bytes(buf))
+        return packets
+
     async def async_send_frame(self, rgb_data: bytes) -> bool:
-        """Send a raw RGB888 frame (DISPLAY_WIDTH × DISPLAY_HEIGHT × 3 bytes)."""
+        """Send a raw RGB888 frame (DISPLAY_WIDTH × DISPLAY_HEIGHT × 3 bytes).
+
+        Wire protocol: one or more CMD_RGB888_ZONES packets, then CMD_RENDER.
+        """
         if len(rgb_data) != FRAME_SIZE:
             _LOGGER.error(
                 "ZeDMD: wrong frame size %d (expected %d)", len(rgb_data), FRAME_SIZE
             )
             return False
+        packets = await self.hass.async_add_executor_job(
+            self._build_zone_packets, rgb_data
+        )
         async with self._lock:
-            return await self._send_command(CMD_RGB888, rgb_data)
+            for payload in packets:
+                if not await self._send_command(CMD_RGB888_ZONES, payload):
+                    return False
+            return await self._send_command(CMD_RENDER)
 
     # ── Text rendering ────────────────────────────────────────────────────
 
