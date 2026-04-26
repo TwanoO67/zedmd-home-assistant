@@ -65,6 +65,7 @@ SERVICE_CLEAR_SCHEMA = vol.Schema(
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up ZeDMD from a config entry."""
+    _LOGGER.warning("ZeDMD: async_setup_entry start (entry=%s)", entry.entry_id)
     coordinator = ZeDMDCoordinator(
         hass=hass,
         host=entry.data[CONF_HOST],
@@ -84,82 +85,84 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
+    _LOGGER.warning("ZeDMD: forwarding entry setup to platforms %s", PLATFORMS)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # ── Register domain-level services (once, idempotent) ─────────────────
-    if not hass.services.has_service(DOMAIN, SERVICE_DISPLAY_TEXT):
+    # ── Register domain-level services (always, to survive reloads) ───────
+    _LOGGER.warning("ZeDMD: registering services on domain %s", DOMAIN)
 
-        def _get_coordinator(call: ServiceCall) -> list[ZeDMDCoordinator]:
-            """Return coordinators referenced by the service call entity_ids."""
-            entity_ids = call.data.get("entity_id")
-            coords: list[ZeDMDCoordinator] = []
-            for eid, coord in hass.data[DOMAIN].items():
-                # If entity_ids filter is absent, target all entries.
-                if entity_ids is None or any(
-                    eid in ei for ei in entity_ids
-                ):
-                    coords.append(coord)
-            # Fallback: return all if filtering matched nothing
-            return coords or list(hass.data[DOMAIN].values())
+    def _get_coordinator(call: ServiceCall) -> list[ZeDMDCoordinator]:
+        """Return coordinators referenced by the service call entity_ids."""
+        entity_ids = call.data.get("entity_id")
+        coords: list[ZeDMDCoordinator] = []
+        for eid, coord in hass.data[DOMAIN].items():
+            # If entity_ids filter is absent, target all entries.
+            if entity_ids is None or any(
+                eid in ei for ei in entity_ids
+            ):
+                coords.append(coord)
+        # Fallback: return all if filtering matched nothing
+        return coords or list(hass.data[DOMAIN].values())
 
-        async def handle_display_text(call: ServiceCall) -> None:
-            for coord in _get_coordinator(call):
-                await coord.async_display_text(
-                    text=call.data["text"],
-                    color=call.data.get("color", "#FFFFFF"),
-                    bg_color=call.data.get("bg_color", "#000000"),
-                    scroll=call.data.get("scroll", True),
-                    scroll_speed=call.data.get("scroll_speed", 2),
-                )
+    async def handle_display_text(call: ServiceCall) -> None:
+        for coord in _get_coordinator(call):
+            await coord.async_display_text(
+                text=call.data["text"],
+                color=call.data.get("color", "#FFFFFF"),
+                bg_color=call.data.get("bg_color", "#000000"),
+                scroll=call.data.get("scroll", True),
+                scroll_speed=call.data.get("scroll_speed", 2),
+            )
 
-        async def handle_set_brightness(call: ServiceCall) -> None:
-            for coord in _get_coordinator(call):
-                await coord.async_set_brightness(call.data["brightness"])
+    async def handle_set_brightness(call: ServiceCall) -> None:
+        for coord in _get_coordinator(call):
+            await coord.async_set_brightness(call.data["brightness"])
 
-        async def handle_clear_screen(call: ServiceCall) -> None:
-            for coord in _get_coordinator(call):
-                await coord.async_stop()
+    async def handle_clear_screen(call: ServiceCall) -> None:
+        for coord in _get_coordinator(call):
+            await coord.async_stop()
 
-        async def handle_test_pattern(call: ServiceCall) -> None:
-            color = call.data.get("color", "red")
-            presets = {
-                "red":   (255, 0,   0),
-                "green": (0,   255, 0),
-                "blue":  (0,   0,   255),
-                "white": (255, 255, 255),
-            }
-            r, g, b = presets.get(color, (255, 0, 0))
-            for coord in _get_coordinator(call):
-                await coord.async_send_test_pattern(r, g, b)
+    async def handle_test_pattern(call: ServiceCall) -> None:
+        color = call.data.get("color", "red")
+        presets = {
+            "red":   (255, 0,   0),
+            "green": (0,   255, 0),
+            "blue":  (0,   0,   255),
+            "white": (255, 255, 255),
+        }
+        r, g, b = presets.get(color, (255, 0, 0))
+        for coord in _get_coordinator(call):
+            await coord.async_send_test_pattern(r, g, b)
 
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_DISPLAY_TEXT,
-            handle_display_text,
-            schema=SERVICE_DISPLAY_TEXT_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SET_BRIGHTNESS,
-            handle_set_brightness,
-            schema=SERVICE_BRIGHTNESS_SCHEMA,
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_TEST_PATTERN,
-            handle_test_pattern,
-            schema=vol.Schema({
-                vol.Optional("entity_id"): vol.Any(str, list),
-                vol.Optional("color", default="red"): vol.In(["red", "green", "blue", "white"]),
-            }),
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_CLEAR_SCREEN,
-            handle_clear_screen,
-            schema=SERVICE_CLEAR_SCHEMA,
-        )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DISPLAY_TEXT,
+        handle_display_text,
+        schema=SERVICE_DISPLAY_TEXT_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_BRIGHTNESS,
+        handle_set_brightness,
+        schema=SERVICE_BRIGHTNESS_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TEST_PATTERN,
+        handle_test_pattern,
+        schema=vol.Schema({
+            vol.Optional("entity_id"): vol.Any(str, list),
+            vol.Optional("color", default="red"): vol.In(["red", "green", "blue", "white"]),
+        }),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CLEAR_SCREEN,
+        handle_clear_screen,
+        schema=SERVICE_CLEAR_SCHEMA,
+    )
 
+    _LOGGER.warning("ZeDMD: services registered (display_text, set_brightness, test_pattern, clear_screen)")
     return True
 
 

@@ -1,7 +1,7 @@
 {
   "domain": "zedmd",
   "name": "ZeDMD",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "documentation": "https://github.com/PPUC/libzedmd",
   "requirements": ["Pillow>=9.2.0"],
   "dependencies": [],
