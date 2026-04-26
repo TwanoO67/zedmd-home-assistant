@@ -62,6 +62,7 @@ class ZeDMDCoordinator:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._lock = asyncio.Lock()
         self._keep_alive_task: Optional[asyncio.Task] = None
+        self._monitor_task: Optional[asyncio.Task] = None
         self._current_task: Optional[asyncio.Task] = None
 
         self.brightness: int = BRIGHTNESS_DEFAULT  # device range 0–15
@@ -203,15 +204,45 @@ class ZeDMDCoordinator:
             return False
 
         # Step 2 – TCP streaming socket
+        # The ZeDMD firmware only allows ONE concurrent TCP client.
+        # If transportActive is still True (e.g. after HA restart without
+        # power-cycling the device), the firmware closes the connection
+        # immediately after the TCP handshake.  We detect this by trying
+        # a small read with a short timeout right after connect.
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.stream_port),
                 timeout=5.0,
             )
+
+            # Quick rejection probe: if the firmware closes the socket
+            # (transportActive already True), we get EOF within ~200 ms.
+            try:
+                peek = await asyncio.wait_for(
+                    self._reader.read(1), timeout=0.3
+                )
+                if peek == b"":
+                    # EOF → firmware rejected us (already has a client)
+                    _LOGGER.error(
+                        "ZeDMD: connection rejected by firmware "
+                        "(device already has an active client). "
+                        "Power-cycle the ZeDMD and try again."
+                    )
+                    self._writer.close()
+                    self._reader = None
+                    self._writer = None
+                    return False
+                # Some unexpected data arrived; log and continue.
+                _LOGGER.debug("ZeDMD: unexpected byte on connect probe: %r", peek)
+            except asyncio.TimeoutError:
+                # No data and no EOF → firmware accepted us (normal path)
+                pass
+
             _LOGGER.info(
                 "ZeDMD: TCP connected to %s:%d", self.host, self.stream_port
             )
             self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+            self._monitor_task = asyncio.create_task(self._connection_monitor())
             self._state = "idle"
             return True
 
@@ -224,6 +255,22 @@ class ZeDMDCoordinator:
             self._writer = None
             return False
 
+    async def _connection_monitor(self) -> None:
+        """Wait for EOF from the firmware (indicates remote disconnect)."""
+        try:
+            await self._reader.read(1)
+            # Any data or EOF here means something unexpected happened
+            _LOGGER.warning("ZeDMD: connection closed by device")
+        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
+            _LOGGER.warning("ZeDMD: connection reset by device")
+        except asyncio.CancelledError:
+            return
+        finally:
+            # Mark as disconnected so the entity shows 'unavailable'
+            self._writer = None
+            self._reader = None
+            self._state = "idle"
+
     async def _do_disconnect(self) -> None:
         """Internal disconnect (cancels tasks, closes socket)."""
         self._state = "idle"
@@ -231,6 +278,10 @@ class ZeDMDCoordinator:
         if self._keep_alive_task:
             self._keep_alive_task.cancel()
             self._keep_alive_task = None
+
+        if self._monitor_task:
+            self._monitor_task.cancel()
+            self._monitor_task = None
 
         if self._current_task:
             self._current_task.cancel()
