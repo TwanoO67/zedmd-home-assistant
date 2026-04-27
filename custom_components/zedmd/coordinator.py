@@ -532,6 +532,72 @@ class ZeDMDCoordinator:
             self._current_task.cancel()
         self._current_task = asyncio.create_task(_scroll_loop())
 
+    # ── GIF playback ──────────────────────────────────────────────────────
+
+    async def async_play_gif(self, url: str, loop: bool = True) -> None:
+        """Download a GIF from *url* and play it frame-by-frame on the display."""
+        import io
+
+        import aiohttp
+        from PIL import Image, ImageSequence
+
+        _LOGGER.info("ZeDMD: downloading GIF from %s", url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.error(
+                            "ZeDMD: GIF download failed status=%d url=%s", resp.status, url
+                        )
+                        return
+                    data = await resp.read()
+        except Exception as ex:
+            _LOGGER.error("ZeDMD: GIF download error: %s", ex)
+            return
+
+        _LOGGER.info("ZeDMD: GIF downloaded (%d bytes), extracting frames", len(data))
+
+        def _extract_frames(raw: bytes) -> list[tuple[bytes, float]]:
+            img = Image.open(io.BytesIO(raw))
+            frames = []
+            for frame in ImageSequence.Iterator(img):
+                duration_ms = frame.info.get("duration", 100)
+                rgb = frame.convert("RGB").resize(
+                    (DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS
+                )
+                frames.append((rgb.tobytes(), max(duration_ms, 10) / 1000.0))
+            return frames
+
+        frames = await self.hass.async_add_executor_job(_extract_frames, data)
+        if not frames:
+            _LOGGER.error("ZeDMD: GIF has no frames")
+            return
+
+        _LOGGER.info("ZeDMD: GIF ready – %d frames, loop=%s", len(frames), loop)
+
+        async def _gif_loop() -> None:
+            self._state = "playing"
+            try:
+                while self._state == "playing":
+                    for rgb_data, duration in frames:
+                        if self._state != "playing":
+                            return
+                        await self.async_send_frame(rgb_data)
+                        await asyncio.sleep(duration)
+                    if not loop:
+                        break
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if self._state == "playing":
+                    self._state = "idle"
+
+        if self._current_task:
+            self._current_task.cancel()
+        self._current_task = asyncio.create_task(_gif_loop())
+
     async def async_stop(self) -> None:
         """Stop current playback and clear the screen."""
         self._state = "idle"

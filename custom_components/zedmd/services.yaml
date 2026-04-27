@@ -79,6 +79,31 @@ clear_screen:
       integration: zedmd
       domain: media_player
 
+play_gif:
+  name: Play GIF
+  description: >
+    Download a GIF from a URL and play it frame-by-frame on the ZeDMD display.
+    The GIF is automatically resized to 128×32. Loops continuously by default.
+  target:
+    entity:
+      integration: zedmd
+      domain: media_player
+  fields:
+    url:
+      name: URL
+      description: HTTP(S) URL of the GIF file to display.
+      required: true
+      example: "https://example.com/animation.gif"
+      selector:
+        text:
+    loop:
+      name: Loop
+      description: Loop the GIF continuously until stopped.
+      required: false
+      default: true
+      selector:
+        boolean:
+
 test_pattern:
   name: Test Pattern
   description: >

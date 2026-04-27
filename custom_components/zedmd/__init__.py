@@ -19,6 +19,7 @@ from .const import (
     DOMAIN,
     SERVICE_CLEAR_SCREEN,
     SERVICE_DISPLAY_TEXT,
+    SERVICE_PLAY_GIF,
     SERVICE_SET_BRIGHTNESS,
     SERVICE_TEST_PATTERN,
 )
@@ -122,6 +123,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for coord in _get_coordinator(call):
             await coord.async_stop()
 
+    async def handle_play_gif(call: ServiceCall) -> None:
+        for coord in _get_coordinator(call):
+            await coord.async_play_gif(
+                url=call.data["url"],
+                loop=call.data.get("loop", True),
+            )
+
     async def handle_test_pattern(call: ServiceCall) -> None:
         color = call.data.get("color", "red")
         presets = {
@@ -161,8 +169,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         handle_clear_screen,
         schema=SERVICE_CLEAR_SCHEMA,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PLAY_GIF,
+        handle_play_gif,
+        schema=vol.Schema({
+            vol.Optional("entity_id"): vol.Any(str, list),
+            vol.Required("url"): cv.string,
+            vol.Optional("loop", default=True): cv.boolean,
+        }),
+    )
 
-    _LOGGER.warning("ZeDMD: services registered (display_text, set_brightness, test_pattern, clear_screen)")
+    _LOGGER.warning("ZeDMD: services registered (display_text, set_brightness, test_pattern, clear_screen, play_gif)")
     return True
 
 
@@ -180,5 +198,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, SERVICE_SET_BRIGHTNESS)
             hass.services.async_remove(DOMAIN, SERVICE_CLEAR_SCREEN)
             hass.services.async_remove(DOMAIN, SERVICE_TEST_PATTERN)
+            hass.services.async_remove(DOMAIN, SERVICE_PLAY_GIF)
 
     return unload_ok

@@ -131,16 +131,26 @@ class ZeDMDMediaPlayer(MediaPlayerEntity):
     ) -> None:
         """Play media.
 
-        Supported media_id formats:
-          • Plain text → display_text with default colours and scrolling
-          • 'text:My message' → same, explicit prefix
+        GIF (media_type=image or .gif URL):
+          • media_content_type: image
+          • media_content_id: https://example.com/anim.gif
+
+        Text formats:
+          • Plain text          → display_text with default colours and scrolling
+          • 'text:My message'   → same, explicit prefix
           • 'text:#FF0000:#000000:My red message' → colour:bg:text
         """
-        if media_type not in (MediaType.MUSIC, MediaType.IMAGE, "text", "custom"):
+        # ── GIF ───────────────────────────────────────────────────────────
+        if media_type == MediaType.IMAGE or media_id.lower().endswith(".gif"):
+            await self._coordinator.async_play_gif(media_id)
+            self.async_write_ha_state()
+            return
+
+        # ── Text ──────────────────────────────────────────────────────────
+        if media_type not in (MediaType.MUSIC, "text", "custom"):
             _LOGGER.warning("ZeDMD: unsupported media_type %r", media_type)
             return
 
-        # Parse media_id
         color = "#FFFFFF"
         bg_color = "#000000"
         text = media_id
