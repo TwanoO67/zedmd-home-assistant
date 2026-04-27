@@ -294,13 +294,22 @@ class ZeDMDCoordinator:
             return False
 
     async def _connection_monitor(self) -> None:
-        """Wait for EOF from the firmware (indicates remote disconnect)."""
+        """Wait for EOF from the firmware (indicates remote disconnect).
+
+        Any bytes that arrive unexpectedly are logged and discarded — the
+        firmware may send a short handshake/ACK on connect that must not
+        be misinterpreted as a disconnect signal.  Only an empty read
+        (EOF) or a socket error marks the connection as lost.
+        """
         try:
-            await self._reader.read(1)
-            # Any data or EOF here means something unexpected happened
-            _LOGGER.warning("ZeDMD: connection closed by device")
-        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
-            _LOGGER.warning("ZeDMD: connection reset by device")
+            while True:
+                data = await self._reader.read(64)
+                if data == b"":  # EOF → device closed the connection
+                    _LOGGER.warning("ZeDMD: connection closed by device")
+                    break
+                _LOGGER.debug("ZeDMD: unexpected data from device (ignored): %r", data)
+        except (asyncio.IncompleteReadError, ConnectionResetError, OSError) as ex:
+            _LOGGER.warning("ZeDMD: connection reset by device: %s", ex)
         except asyncio.CancelledError:
             return
         finally:
@@ -308,6 +317,12 @@ class ZeDMDCoordinator:
             self._writer = None
             self._reader = None
             self._state = "idle"
+
+    async def _try_reconnect(self) -> bool:
+        """Cleanly disconnect then reconnect. Returns True on success."""
+        _LOGGER.info("ZeDMD: not connected – attempting reconnect")
+        await self._do_disconnect()
+        return await self.async_connect()
 
     async def _do_disconnect(self) -> None:
         """Internal disconnect (cancels tasks, closes socket)."""
@@ -361,6 +376,8 @@ class ZeDMDCoordinator:
 
     async def async_clear_screen(self) -> bool:
         """Blank the display."""
+        if not self.connected and not await self._try_reconnect():
+            return False
         async with self._lock:
             return await self._send_command(CMD_CLEAR)
 
@@ -369,6 +386,8 @@ class ZeDMDCoordinator:
         level = round(percent / 100.0 * BRIGHTNESS_MAX)
         level = max(0, min(BRIGHTNESS_MAX, level))
         self.brightness = level
+        if not self.connected and not await self._try_reconnect():
+            return False
         async with self._lock:
             return await self._send_command(CMD_BRIGHTNESS, bytes([level]))
 
@@ -428,6 +447,8 @@ class ZeDMDCoordinator:
             _LOGGER.error(
                 "ZeDMD: wrong frame size %d (expected %d)", len(rgb_data), FRAME_SIZE
             )
+            return False
+        if not self.connected and not await self._try_reconnect():
             return False
         packets = await self.hass.async_add_executor_job(
             self._build_zone_packets, rgb_data
