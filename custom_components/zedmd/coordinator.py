@@ -1,4 +1,4 @@
-"""ZeDMD coordinator: TCP connection + protocol + text rendering."""
+"""ZeDMD coordinator: TCP/UDP connection + protocol + text rendering."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from .const import (
     DISPLAY_WIDTH,
     FRAME_SIZE,
     KEEP_ALIVE_INTERVAL,
+    KEEP_ALIVE_INTERVAL_UDP,
     TOTAL_ZONES,
     ZEDMD_CTRL_HEADER,
     ZEDMD_FRAME_HEADER,
@@ -37,6 +38,16 @@ _BLACK_ZONE_565 = b"\x00" * ZONE_BYTES_565
 _LOGGER = logging.getLogger(__name__)
 
 
+class _UDPProtocol(asyncio.DatagramProtocol):
+    """Minimal DatagramProtocol for ZeDMD UDP transport."""
+
+    def error_received(self, exc: Exception) -> None:
+        _LOGGER.debug("ZeDMD UDP error: %s", exc)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        _LOGGER.debug("ZeDMD UDP connection lost: %s", exc)
+
+
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     """Convert '#RRGGBB' or 'RRGGBB' to (R, G, B)."""
     value = value.strip().lstrip("#")
@@ -45,15 +56,17 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
 
 
 class ZeDMDCoordinator:
-    """Manages the ZeDMD TCP connection, protocol framing, and text rendering.
+    """Manages the ZeDMD TCP/UDP connection, protocol framing, and text rendering.
 
     Protocol notes (firmware main.cpp HandleData / libzedmd ZeDMDComm.cpp):
       • Logical packet  = FRAME_HEADER(5) + CTRL_HEADER(5) + cmd(1)
                           + size_hi(1) + size_lo(1) + comp_flag(1) + payload
-      • Frame display = N×CMD_RGB888_ZONES (0x04) packets carrying zone entries,
+      • Frame display = N×CMD_RGB565_ZONES (0x05) packets carrying zone entries,
         then a single CMD_RENDER (0x06) packet to flip the buffer.
       • Each payload must fit in the firmware's BUFFER_SIZE (1152 B on ESP32).
-      • Over WiFi/TCP the firmware sends no ACK; reliability is handled by TCP.
+      • Transport is auto-detected from the HTTP handshake (field[4] = TCP/UDP).
+      • Over TCP: streaming socket, reliability by transport layer (no ACK).
+      • Over UDP: one datagram per logical packet, udp_delay between packets.
     """
 
     def __init__(
@@ -70,6 +83,7 @@ class ZeDMDCoordinator:
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
+        self._udp_transport: Optional[asyncio.DatagramTransport] = None
         self._lock = asyncio.Lock()
         self._keep_alive_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
@@ -77,13 +91,16 @@ class ZeDMDCoordinator:
 
         self.brightness: int = BRIGHTNESS_DEFAULT  # device range 0–15
         self.firmware_version: str = "unknown"
-        self.transport: str = "TCP"
+        self.transport: str = "TCP"   # updated by HTTP handshake
+        self.udp_delay: float = 0.0   # inter-packet delay in seconds (from handshake field[6])
         self._state: str = "idle"  # idle | playing | paused
 
     # ── Public properties ─────────────────────────────────────────────────
 
     @property
     def connected(self) -> bool:
+        if self.transport == "UDP":
+            return self._udp_transport is not None and not self._udp_transport.is_closing()
         return self._writer is not None and not self._writer.is_closing()
 
     @property
@@ -106,11 +123,7 @@ class ZeDMDCoordinator:
     # ── Low-level I/O ─────────────────────────────────────────────────────
 
     async def _send_command(self, command: int, data: bytes = b"") -> bool:
-        """Send a logical packet over TCP (no ACK – WiFi/TCP firmware is fire-and-forget).
-
-        The libzedmd ACK mechanism only exists on the serial transport.
-        Over TCP, reliability is guaranteed by the transport layer itself.
-        """
+        """Send a logical packet over TCP or UDP (no ACK on either transport)."""
         if not self.connected:
             _LOGGER.error("ZeDMD: not connected – cannot send command 0x%02X", command)
             return False
@@ -122,13 +135,19 @@ class ZeDMDCoordinator:
         )
 
         try:
-            self._writer.write(packet)
-            await self._writer.drain()
+            if self.transport == "UDP":
+                self._udp_transport.sendto(packet)
+                if self.udp_delay > 0:
+                    await asyncio.sleep(self.udp_delay)
+            else:
+                self._writer.write(packet)
+                await self._writer.drain()
             return True
 
-        except (ConnectionResetError, BrokenPipeError, OSError) as ex:
-            _LOGGER.error("ZeDMD: connection lost during send: %s", ex)
-            await self._do_disconnect()
+        except OSError as ex:
+            _LOGGER.error("ZeDMD: send error: %s", ex)
+            if self.transport != "UDP":
+                await self._do_disconnect()
             return False
 
     async def async_send_test_pattern(self, r: int = 255, g: int = 0, b: int = 0) -> bool:
@@ -182,6 +201,8 @@ class ZeDMDCoordinator:
                 self.transport = fields[4].strip().upper()  # "TCP" or "UDP"
             if len(fields) > 5 and fields[5].strip().isdigit():
                 self.stream_port = int(fields[5].strip())
+            if len(fields) > 6 and fields[6].strip().isdigit():
+                self.udp_delay = int(fields[6].strip()) / 1000.0  # ms → s
             if len(fields) > 8 and fields[8].strip().isdigit():
                 self.brightness = int(fields[8].strip())
 
@@ -201,37 +222,32 @@ class ZeDMDCoordinator:
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def async_connect(self) -> bool:
-        """HTTP handshake then open the TCP streaming connection."""
-        # Step 1 – HTTP handshake (updates stream_port, firmware version, etc.)
-        await self._http_handshake()  # non-fatal if it fails
-
+        """HTTP handshake then open the streaming connection (TCP or UDP)."""
+        await self._http_handshake()  # non-fatal if it fails; updates transport
         if self.transport == "UDP":
-            _LOGGER.error(
-                "ZeDMD: device is in UDP mode – this integration requires TCP. "
-                "Change the transport in the ZeDMD firmware settings."
-            )
-            return False
+            return await self._connect_udp()
+        return await self._connect_tcp()
 
-        # Step 2 – TCP streaming socket
-        # The ZeDMD firmware only allows ONE concurrent TCP client.
-        # If transportActive is still True (e.g. after HA restart without
-        # power-cycling the device), the firmware closes the connection
-        # immediately after the TCP handshake.  We detect this by trying
-        # a small read with a short timeout right after connect.
+    async def _connect_tcp(self) -> bool:
+        """Open the TCP streaming socket.
+
+        The ZeDMD firmware only allows ONE concurrent TCP client.
+        If transportActive is still True (e.g. after HA restart without
+        power-cycling the device), the firmware closes the connection
+        immediately after the TCP handshake.  We detect this by trying
+        a small read with a short timeout right after connect.
+        """
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.stream_port),
                 timeout=5.0,
             )
 
-            # Quick rejection probe: if the firmware closes the socket
-            # (transportActive already True), we get EOF within ~200 ms.
+            # Quick rejection probe: EOF within ~200 ms means firmware already
+            # has an active client (transportActive=True).
             try:
-                peek = await asyncio.wait_for(
-                    self._reader.read(1), timeout=0.3
-                )
+                peek = await asyncio.wait_for(self._reader.read(1), timeout=0.3)
                 if peek == b"":
-                    # EOF → firmware rejected us (already has a client)
                     _LOGGER.error(
                         "ZeDMD: connection rejected by firmware "
                         "(device already has an active client). "
@@ -241,27 +257,40 @@ class ZeDMDCoordinator:
                     self._reader = None
                     self._writer = None
                     return False
-                # Some unexpected data arrived; log and continue.
                 _LOGGER.debug("ZeDMD: unexpected byte on connect probe: %r", peek)
             except asyncio.TimeoutError:
-                # No data and no EOF → firmware accepted us (normal path)
-                pass
+                pass  # no data, no EOF → firmware accepted us (normal path)
 
-            _LOGGER.info(
-                "ZeDMD: TCP connected to %s:%d", self.host, self.stream_port
-            )
+            _LOGGER.info("ZeDMD: TCP connected to %s:%d", self.host, self.stream_port)
             self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
             self._monitor_task = asyncio.create_task(self._connection_monitor())
             self._state = "idle"
             return True
 
         except (OSError, asyncio.TimeoutError) as ex:
-            _LOGGER.error(
-                "ZeDMD: TCP connect to %s:%d failed: %s",
-                self.host, self.stream_port, ex,
-            )
+            _LOGGER.error("ZeDMD: TCP connect to %s:%d failed: %s", self.host, self.stream_port, ex)
             self._reader = None
             self._writer = None
+            return False
+
+    async def _connect_udp(self) -> bool:
+        """Create a connected UDP socket (datagram endpoint)."""
+        try:
+            loop = asyncio.get_event_loop()
+            transport, _ = await loop.create_datagram_endpoint(
+                _UDPProtocol,
+                remote_addr=(self.host, self.stream_port),
+            )
+            self._udp_transport = transport
+            _LOGGER.info(
+                "ZeDMD: UDP ready → %s:%d (inter-packet delay=%.0f ms)",
+                self.host, self.stream_port, self.udp_delay * 1000,
+            )
+            self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+            self._state = "idle"
+            return True
+        except OSError as ex:
+            _LOGGER.error("ZeDMD: UDP setup failed: %s", ex)
             return False
 
     async def _connection_monitor(self) -> None:
@@ -296,6 +325,10 @@ class ZeDMDCoordinator:
             self._current_task.cancel()
             self._current_task = None
 
+        if self._udp_transport:
+            self._udp_transport.close()
+            self._udp_transport = None
+
         if self._writer:
             try:
                 self._writer.close()
@@ -312,19 +345,17 @@ class ZeDMDCoordinator:
     # ── Keep-alive ────────────────────────────────────────────────────────
 
     async def _keep_alive_loop(self) -> None:
-        """Send CMD_KEEP_ALIVE every KEEP_ALIVE_INTERVAL seconds."""
+        """Send CMD_KEEP_ALIVE periodically (interval depends on transport)."""
+        interval = KEEP_ALIVE_INTERVAL_UDP if self.transport == "UDP" else KEEP_ALIVE_INTERVAL
         while True:
-            await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+            await asyncio.sleep(interval)
             if not self.connected:
                 break
             async with self._lock:
                 try:
-                    packet = self._build_packet(CMD_KEEP_ALIVE)
-                    self._writer.write(packet)
-                    await self._writer.drain()
-                    # Keep-alive expects no ACK from the device.
+                    await self._send_command(CMD_KEEP_ALIVE)
                 except Exception as ex:
-                    _LOGGER.debug("ZeDMD: keep-alive write error: %s", ex)
+                    _LOGGER.debug("ZeDMD: keep-alive error: %s", ex)
 
     # ── Display commands ──────────────────────────────────────────────────
 

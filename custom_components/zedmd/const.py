@@ -42,7 +42,8 @@ ZEDMD_CTRL_HEADER  = b"ZeDMD"  # 5 bytes – control/ID marker
 ZEDMD_ACK          = b"ZeDMDA" # expected 6-byte ACK  ("ZeDMD" + "A")
 
 # Keep-alive cadence (seconds)
-KEEP_ALIVE_INTERVAL = 3.0
+KEEP_ALIVE_INTERVAL     = 3.0
+KEEP_ALIVE_INTERVAL_UDP = 1.0  # UDP is stateless, pulse more often
 
 # Commands  (ZEDMD_COMM_COMMAND enum from ZeDMDComm.h, matching firmware switch)
 # Firmware ≤5.x only implements case 5 (RGB565). RGB888 (case 4) was added in 6.0.0.

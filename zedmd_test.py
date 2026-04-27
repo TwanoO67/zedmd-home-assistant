@@ -148,14 +148,22 @@ def _measure_text(text: str, font) -> int:
 # ── Client ─────────────────────────────────────────────────────────────────
 
 
+class _UDPProtocol(asyncio.DatagramProtocol):
+    def error_received(self, exc: Exception) -> None:
+        print(f"[warn] UDP error: {exc}", file=sys.stderr)
+
+
 class ZeDMDClient:
-    def __init__(self, host: str, http_port: int, stream_port: int) -> None:
+    def __init__(self, host: str, http_port: int, stream_port: int, force_udp: bool = False) -> None:
         self.host = host
         self.http_port = http_port
         self.stream_port = stream_port
         self.firmware_version = "unknown"
+        self.transport = "UDP" if force_udp else "TCP"
+        self.udp_delay: float = 0.0
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._udp_transport: asyncio.DatagramTransport | None = None
 
     async def handshake(self) -> bool:
         import aiohttp
@@ -174,9 +182,14 @@ class ZeDMDClient:
             fields = body.split("|")
             if len(fields) > 2:
                 self.firmware_version = fields[2]
+            if len(fields) > 4 and self.transport == "TCP":
+                # Only auto-detect if not forced via --udp
+                self.transport = fields[4].strip().upper()
             if len(fields) > 5 and fields[5].strip().isdigit():
                 self.stream_port = int(fields[5].strip())
-            print(f"[ok] Handshake – fw={self.firmware_version}  stream_port={self.stream_port}")
+            if len(fields) > 6 and fields[6].strip().isdigit():
+                self.udp_delay = int(fields[6].strip()) / 1000.0
+            print(f"[ok] Handshake – fw={self.firmware_version}  transport={self.transport}  stream_port={self.stream_port}")
             return True
         except Exception as ex:
             print(f"[warn] Handshake failed: {ex}", file=sys.stderr)
@@ -184,6 +197,11 @@ class ZeDMDClient:
 
     async def connect(self) -> bool:
         await self.handshake()
+        if self.transport == "UDP":
+            return await self._connect_udp()
+        return await self._connect_tcp()
+
+    async def _connect_tcp(self) -> bool:
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.stream_port),
@@ -204,7 +222,24 @@ class ZeDMDClient:
             print(f"[error] TCP connect failed: {ex}", file=sys.stderr)
             return False
 
+    async def _connect_udp(self) -> bool:
+        try:
+            loop = asyncio.get_event_loop()
+            transport, _ = await loop.create_datagram_endpoint(
+                _UDPProtocol,
+                remote_addr=(self.host, self.stream_port),
+            )
+            self._udp_transport = transport
+            print(f"[ok] UDP ready → {self.host}:{self.stream_port} (inter-packet delay={self.udp_delay*1000:.0f} ms)")
+            return True
+        except OSError as ex:
+            print(f"[error] UDP setup failed: {ex}", file=sys.stderr)
+            return False
+
     async def disconnect(self) -> None:
+        if self._udp_transport:
+            self._udp_transport.close()
+            self._udp_transport = None
         if self._writer:
             self._writer.close()
             try:
@@ -216,8 +251,13 @@ class ZeDMDClient:
     async def _send(self, command: int, data: bytes = b"") -> bool:
         packet = _build_packet(command, data)
         try:
-            self._writer.write(packet)
-            await self._writer.drain()
+            if self.transport == "UDP":
+                self._udp_transport.sendto(packet)
+                if self.udp_delay > 0:
+                    await asyncio.sleep(self.udp_delay)
+            else:
+                self._writer.write(packet)
+                await self._writer.drain()
             return True
         except Exception as ex:
             print(f"[error] Send failed: {ex}", file=sys.stderr)
@@ -301,7 +341,7 @@ class ZeDMDClient:
 
 
 async def _main(args: argparse.Namespace) -> int:
-    client = ZeDMDClient(args.host, args.http_port, args.stream_port)
+    client = ZeDMDClient(args.host, args.http_port, args.stream_port, force_udp=args.udp)
 
     if not await client.connect():
         return 1
@@ -340,6 +380,8 @@ def main() -> None:
     parser.add_argument("--host", required=True, help="ZeDMD IP address or hostname")
     parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT, metavar="PORT")
     parser.add_argument("--stream-port", type=int, default=DEFAULT_STREAM_PORT, metavar="PORT")
+    parser.add_argument("--udp", action="store_true",
+                        help="Force UDP transport (default: auto-detect from handshake)")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
