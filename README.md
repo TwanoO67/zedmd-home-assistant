@@ -38,6 +38,7 @@ Copier le dossier `custom_components/zedmd/` dans `/config/custom_components/zed
 | `zedmd.set_brightness` | Règle la luminosité (0–100 %) |
 | `zedmd.test_pattern` | Envoie un cadre de couleur unie |
 | `zedmd.play_gif` | Joue un GIF animé depuis une URL (avec ou sans boucle) |
+| `zedmd.play_random_gifs` | Enchaîne aléatoirement les GIFs de la bibliothèque locale |
 
 ## Bibliothèque GIF locale (Media Browser)
 
@@ -88,6 +89,32 @@ service: zedmd.play_gif
 data:
   url: https://example.com/animated.gif
   loop: true
+```
+
+### Lecture aléatoire en boucle
+
+Le service `zedmd.play_random_gifs` enchaîne en continu les GIFs présents dans `/config/www/zedmd_gifs/`. Chaque GIF est joué une fois en entier, puis un autre est tiré au hasard (sans répéter le précédent immédiatement).
+
+```yaml
+# Random infini (jusqu'à arrêt manuel via media_stop ou clear_screen)
+service: zedmd.play_random_gifs
+
+# Random borné : joue 5 GIFs aléatoires puis s'arrête
+service: zedmd.play_random_gifs
+data:
+  count: 5
+```
+
+Idéal pour une automatisation matinale, par exemple :
+
+```yaml
+automation:
+  - alias: "ZeDMD: rotation matinale"
+    trigger:
+      platform: time
+      at: "08:00:00"
+    action:
+      - service: zedmd.play_random_gifs
 ```
 
 ---

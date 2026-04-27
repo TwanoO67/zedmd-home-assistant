@@ -20,6 +20,7 @@ from .const import (
     SERVICE_CLEAR_SCREEN,
     SERVICE_DISPLAY_TEXT,
     SERVICE_PLAY_GIF,
+    SERVICE_PLAY_RANDOM,
     SERVICE_SET_BRIGHTNESS,
     SERVICE_TEST_PATTERN,
 )
@@ -130,6 +131,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 loop=call.data.get("loop", True),
             )
 
+    async def handle_play_random(call: ServiceCall) -> None:
+        for coord in _get_coordinator(call):
+            await coord.async_play_random_loop(
+                count=call.data.get("count", 0),
+            )
+
     async def handle_test_pattern(call: ServiceCall) -> None:
         color = call.data.get("color", "red")
         presets = {
@@ -179,8 +186,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             vol.Optional("loop", default=True): cv.boolean,
         }),
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PLAY_RANDOM,
+        handle_play_random,
+        schema=vol.Schema({
+            vol.Optional("entity_id"): vol.Any(str, list),
+            vol.Optional("count", default=0): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=10000)
+            ),
+        }),
+    )
 
-    _LOGGER.warning("ZeDMD: services registered (display_text, set_brightness, test_pattern, clear_screen, play_gif)")
+    _LOGGER.warning("ZeDMD: services registered (display_text, set_brightness, test_pattern, clear_screen, play_gif, play_random_gifs)")
     return True
 
 
@@ -199,5 +217,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, SERVICE_CLEAR_SCREEN)
             hass.services.async_remove(DOMAIN, SERVICE_TEST_PATTERN)
             hass.services.async_remove(DOMAIN, SERVICE_PLAY_GIF)
+            hass.services.async_remove(DOMAIN, SERVICE_PLAY_RANDOM)
 
     return unload_ok

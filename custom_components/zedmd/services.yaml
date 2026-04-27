@@ -104,6 +104,30 @@ play_gif:
       selector:
         boolean:
 
+play_random_gifs:
+  name: Play random GIFs
+  description: >
+    Continuously play random GIFs from /config/www/zedmd_gifs/. Each GIF is
+    played once in full, then a different one is picked at random. Stop with
+    media_player.media_stop or zedmd.clear_screen.
+  target:
+    entity:
+      integration: zedmd
+      domain: media_player
+  fields:
+    count:
+      name: Count
+      description: Number of GIFs to play before stopping (0 = infinite).
+      required: false
+      default: 0
+      example: 5
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 1
+          mode: box
+
 test_pattern:
   name: Test Pattern
   description: >

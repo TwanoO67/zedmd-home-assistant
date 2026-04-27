@@ -65,3 +65,7 @@ SERVICE_SET_BRIGHTNESS = "set_brightness"
 SERVICE_CLEAR_SCREEN   = "clear_screen"
 SERVICE_TEST_PATTERN   = "test_pattern"
 SERVICE_PLAY_GIF       = "play_gif"
+SERVICE_PLAY_RANDOM    = "play_random_gifs"
+
+# Local GIF library (relative to /config/)
+GIF_LIBRARY_SUBDIR = "www/zedmd_gifs"

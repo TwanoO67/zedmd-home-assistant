@@ -24,6 +24,7 @@ from .const import (
     CONF_NAME,
     CONF_STREAM_PORT,
     DOMAIN,
+    GIF_LIBRARY_SUBDIR,
 )
 from .coordinator import ZeDMDCoordinator
 
@@ -32,7 +33,6 @@ _LOGGER = logging.getLogger(__name__)
 # Local GIF library: drop *.gif files in /config/www/zedmd_gifs/ and they
 # show up automatically in the media browser.  HA serves /config/www/ at
 # /local/, so the files are also accessible as thumbnails.
-GIF_LIBRARY_SUBDIR = "www/zedmd_gifs"
 LIBRARY_PREFIX = "library/"
 
 SUPPORTED_FEATURES = (

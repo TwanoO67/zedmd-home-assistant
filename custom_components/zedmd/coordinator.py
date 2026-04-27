@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -22,6 +24,7 @@ from .const import (
     DISPLAY_HEIGHT,
     DISPLAY_WIDTH,
     FRAME_SIZE,
+    GIF_LIBRARY_SUBDIR,
     KEEP_ALIVE_INTERVAL,
     KEEP_ALIVE_INTERVAL_UDP,
     TOTAL_ZONES,
@@ -698,6 +701,73 @@ class ZeDMDCoordinator:
 
         _LOGGER.info("ZeDMD: GIF ready – %d frames, loop=%s", len(frames), loop)
         await self._play_gif_frames(frames, loop)
+
+    async def async_play_random_loop(self, count: int = 0) -> None:
+        """Play random GIFs from the local library, one full cycle each.
+
+        Picks a random *.gif from /config/www/zedmd_gifs/, plays it once,
+        then picks another (avoiding immediate repeats when ≥2 files).
+
+        count: 0 = infinite, otherwise stop after N GIFs have played.
+        """
+        gif_dir = Path(self.hass.config.path(GIF_LIBRARY_SUBDIR))
+
+        def _scan() -> list[Path]:
+            if not gif_dir.is_dir():
+                return []
+            return list(gif_dir.glob("*.gif"))
+
+        paths = await self.hass.async_add_executor_job(_scan)
+        if not paths:
+            _LOGGER.error("ZeDMD: random loop: no GIFs in %s", gif_dir)
+            return
+
+        _LOGGER.info(
+            "ZeDMD: starting random loop (%d GIFs in library, count=%s)",
+            len(paths), "∞" if count <= 0 else count,
+        )
+
+        async def _random_loop() -> None:
+            self._state = "playing"
+            played = 0
+            last_path: Optional[Path] = None
+            try:
+                while self._state == "playing":
+                    candidates = [p for p in paths if p != last_path] if len(paths) > 1 else paths
+                    path = random.choice(candidates)
+                    last_path = path
+
+                    try:
+                        data = await self.hass.async_add_executor_job(
+                            lambda p=path: p.read_bytes()
+                        )
+                        frames = await self.hass.async_add_executor_job(
+                            self._extract_gif_frames, data
+                        )
+                    except Exception as ex:
+                        _LOGGER.error("ZeDMD: random loop: skip %s: %s", path.name, ex)
+                        continue
+
+                    _LOGGER.info("ZeDMD: random loop: now playing %s (%d frames)", path.name, len(frames))
+                    for rgb_data, duration in frames:
+                        if self._state != "playing":
+                            return
+                        if not await self.async_send_frame(rgb_data):
+                            return
+                        await asyncio.sleep(duration)
+
+                    played += 1
+                    if count > 0 and played >= count:
+                        break
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if self._state == "playing":
+                    self._state = "idle"
+
+        if self._current_task:
+            self._current_task.cancel()
+        self._current_task = asyncio.create_task(_random_loop())
 
     async def async_stop(self) -> None:
         """Stop current playback and clear the screen."""
