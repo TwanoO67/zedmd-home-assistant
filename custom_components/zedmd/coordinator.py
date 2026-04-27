@@ -243,23 +243,41 @@ class ZeDMDCoordinator:
                 timeout=5.0,
             )
 
-            # Quick rejection probe: EOF within ~200 ms means firmware already
-            # has an active client (transportActive=True).
+            # Rejection probe: drain all initial bytes for up to 1.5 s.
+            # The firmware (transportActive=True) may send FIN (EOF) or RST
+            # up to ~1 s after accepting the TCP handshake at the OS level.
+            # We keep reading until the window closes or we detect a reject.
             try:
-                peek = await asyncio.wait_for(self._reader.read(1), timeout=0.3)
-                if peek == b"":
-                    _LOGGER.error(
-                        "ZeDMD: connection rejected by firmware "
-                        "(device already has an active client). "
-                        "Power-cycle the ZeDMD and try again."
+                deadline = asyncio.get_event_loop().time() + 1.5
+                while True:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    chunk = await asyncio.wait_for(
+                        self._reader.read(64), timeout=remaining
                     )
-                    self._writer.close()
-                    self._reader = None
-                    self._writer = None
-                    return False
-                _LOGGER.debug("ZeDMD: unexpected byte on connect probe: %r", peek)
+                    if chunk == b"":  # EOF → firmware rejected (transportActive)
+                        _LOGGER.error(
+                            "ZeDMD: connection rejected by firmware "
+                            "(device already has an active client). "
+                            "Power-cycle the ZeDMD and try again."
+                        )
+                        self._writer.close()
+                        self._reader = None
+                        self._writer = None
+                        return False
+                    _LOGGER.debug("ZeDMD: initial bytes from firmware (ignored): %r", chunk)
             except asyncio.TimeoutError:
-                pass  # no data, no EOF → firmware accepted us (normal path)
+                pass  # window elapsed with no EOF → firmware accepted us (normal path)
+            except ConnectionResetError:
+                _LOGGER.error(
+                    "ZeDMD: connection reset by firmware during probe "
+                    "(device already has an active client). "
+                    "Power-cycle the ZeDMD and try again."
+                )
+                self._reader = None
+                self._writer = None
+                return False
 
             _LOGGER.info("ZeDMD: TCP connected to %s:%d", self.host, self.stream_port)
             self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
