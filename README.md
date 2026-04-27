@@ -2,7 +2,7 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
-Intégration Home Assistant pour l'afficheur LED matriciel **ZeDMD** (128×32 HUB75, firmware ESP32 ZeDMDWiFi).
+Intégration Home Assistant pour l'afficheur LED matriciel [**ZeDMD**](https://github.com/PPUC/ZeDMD) (128×32 HUB75, firmware ESP32 ZeDMDWiFi).
 
 ## Matériel supporté
 
