@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from homeassistant.components.media_player import (
+    BrowseMedia,
+    MediaClass,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
@@ -26,12 +29,19 @@ from .coordinator import ZeDMDCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# Local GIF library: drop *.gif files in /config/www/zedmd_gifs/ and they
+# show up automatically in the media browser.  HA serves /config/www/ at
+# /local/, so the files are also accessible as thumbnails.
+GIF_LIBRARY_SUBDIR = "www/zedmd_gifs"
+LIBRARY_PREFIX = "library/"
+
 SUPPORTED_FEATURES = (
     MediaPlayerEntityFeature.PLAY
     | MediaPlayerEntityFeature.PAUSE
     | MediaPlayerEntityFeature.STOP
     | MediaPlayerEntityFeature.VOLUME_SET
     | MediaPlayerEntityFeature.PLAY_MEDIA
+    | MediaPlayerEntityFeature.BROWSE_MEDIA
 )
 
 
@@ -131,6 +141,9 @@ class ZeDMDMediaPlayer(MediaPlayerEntity):
     ) -> None:
         """Play media.
 
+        Library (from media browser):
+          • media_content_id: 'library/<filename>.gif'
+
         GIF (media_type=image or .gif URL):
           • media_content_type: image
           • media_content_id: https://example.com/anim.gif
@@ -140,6 +153,14 @@ class ZeDMDMediaPlayer(MediaPlayerEntity):
           • 'text:My message'   → same, explicit prefix
           • 'text:#FF0000:#000000:My red message' → colour:bg:text
         """
+        # ── Local GIF library ─────────────────────────────────────────────
+        if media_id.startswith(LIBRARY_PREFIX):
+            filename = media_id[len(LIBRARY_PREFIX):]
+            full_path = self.hass.config.path(GIF_LIBRARY_SUBDIR, filename)
+            await self._coordinator.async_play_gif_file(full_path)
+            self.async_write_ha_state()
+            return
+
         # ── GIF ───────────────────────────────────────────────────────────
         if media_type == MediaType.IMAGE or media_id.lower().endswith(".gif"):
             await self._coordinator.async_play_gif(media_id)
@@ -167,6 +188,47 @@ class ZeDMDMediaPlayer(MediaPlayerEntity):
             text=text, color=color, bg_color=bg_color, scroll=True
         )
         self.async_write_ha_state()
+
+    # ── Media browser (local GIF library) ─────────────────────────────────
+
+    async def async_browse_media(
+        self,
+        media_content_type: str | None = None,
+        media_content_id: str | None = None,
+    ) -> BrowseMedia:
+        """Expose *.gif files in /config/www/zedmd_gifs/ to the media browser."""
+        gif_dir = Path(self.hass.config.path(GIF_LIBRARY_SUBDIR))
+
+        def _scan() -> list[Path]:
+            if not gif_dir.is_dir():
+                return []
+            return sorted(gif_dir.glob("*.gif"))
+
+        gif_paths = await self.hass.async_add_executor_job(_scan)
+
+        children = [
+            BrowseMedia(
+                title=path.stem,
+                media_class=MediaClass.IMAGE,
+                media_content_id=f"{LIBRARY_PREFIX}{path.name}",
+                media_content_type="image/gif",
+                can_play=True,
+                can_expand=False,
+                thumbnail=f"/local/zedmd_gifs/{path.name}",
+            )
+            for path in gif_paths
+        ]
+
+        return BrowseMedia(
+            title="ZeDMD GIFs",
+            media_class=MediaClass.DIRECTORY,
+            media_content_id="",
+            media_content_type="library",
+            can_play=False,
+            can_expand=True,
+            children=children,
+            children_media_class=MediaClass.IMAGE,
+        )
 
     # ── Extra state attributes ────────────────────────────────────────────
 

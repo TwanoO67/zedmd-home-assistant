@@ -604,49 +604,27 @@ class ZeDMDCoordinator:
 
     # ── GIF playback ──────────────────────────────────────────────────────
 
-    async def async_play_gif(self, url: str, loop: bool = True) -> None:
-        """Download a GIF from *url* and play it frame-by-frame on the display."""
+    @staticmethod
+    def _extract_gif_frames(raw: bytes) -> list[tuple[bytes, float]]:
+        """Decode a GIF byte stream into (rgb888, duration_seconds) tuples."""
         import io
 
-        import aiohttp
         from PIL import Image, ImageSequence
 
-        _LOGGER.info("ZeDMD: downloading GIF from %s", url)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    if resp.status != 200:
-                        _LOGGER.error(
-                            "ZeDMD: GIF download failed status=%d url=%s", resp.status, url
-                        )
-                        return
-                    data = await resp.read()
-        except Exception as ex:
-            _LOGGER.error("ZeDMD: GIF download error: %s", ex)
-            return
+        img = Image.open(io.BytesIO(raw))
+        frames = []
+        for frame in ImageSequence.Iterator(img):
+            duration_ms = frame.info.get("duration", 100)
+            rgb = frame.convert("RGB").resize(
+                (DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS
+            )
+            frames.append((rgb.tobytes(), max(duration_ms, 10) / 1000.0))
+        return frames
 
-        _LOGGER.info("ZeDMD: GIF downloaded (%d bytes), extracting frames", len(data))
-
-        def _extract_frames(raw: bytes) -> list[tuple[bytes, float]]:
-            img = Image.open(io.BytesIO(raw))
-            frames = []
-            for frame in ImageSequence.Iterator(img):
-                duration_ms = frame.info.get("duration", 100)
-                rgb = frame.convert("RGB").resize(
-                    (DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS
-                )
-                frames.append((rgb.tobytes(), max(duration_ms, 10) / 1000.0))
-            return frames
-
-        frames = await self.hass.async_add_executor_job(_extract_frames, data)
-        if not frames:
-            _LOGGER.error("ZeDMD: GIF has no frames")
-            return
-
-        _LOGGER.info("ZeDMD: GIF ready – %d frames, loop=%s", len(frames), loop)
-
+    async def _play_gif_frames(
+        self, frames: list[tuple[bytes, float]], loop: bool
+    ) -> None:
+        """Start a background task that streams *frames* to the display."""
         async def _gif_loop() -> None:
             self._state = "playing"
             try:
@@ -667,6 +645,59 @@ class ZeDMDCoordinator:
         if self._current_task:
             self._current_task.cancel()
         self._current_task = asyncio.create_task(_gif_loop())
+
+    async def async_play_gif(self, url: str, loop: bool = True) -> None:
+        """Download a GIF from *url* and play it frame-by-frame."""
+        import aiohttp
+
+        _LOGGER.info("ZeDMD: downloading GIF from %s", url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.error(
+                            "ZeDMD: GIF download failed status=%d url=%s", resp.status, url
+                        )
+                        return
+                    data = await resp.read()
+        except Exception as ex:
+            _LOGGER.error("ZeDMD: GIF download error: %s", ex)
+            return
+
+        await self._play_gif_bytes(data, loop, source=url)
+
+    async def async_play_gif_file(self, file_path: str, loop: bool = True) -> None:
+        """Read a local GIF file and play it frame-by-frame."""
+        _LOGGER.info("ZeDMD: loading GIF from %s", file_path)
+        try:
+            data = await self.hass.async_add_executor_job(
+                lambda: open(file_path, "rb").read()
+            )
+        except OSError as ex:
+            _LOGGER.error("ZeDMD: cannot read GIF %s: %s", file_path, ex)
+            return
+
+        await self._play_gif_bytes(data, loop, source=file_path)
+
+    async def _play_gif_bytes(self, data: bytes, loop: bool, source: str) -> None:
+        """Decode raw GIF bytes and start playback."""
+        _LOGGER.info("ZeDMD: GIF loaded (%d bytes), extracting frames", len(data))
+        try:
+            frames = await self.hass.async_add_executor_job(
+                self._extract_gif_frames, data
+            )
+        except Exception as ex:
+            _LOGGER.error("ZeDMD: GIF decode error for %s: %s", source, ex)
+            return
+
+        if not frames:
+            _LOGGER.error("ZeDMD: GIF has no frames (%s)", source)
+            return
+
+        _LOGGER.info("ZeDMD: GIF ready – %d frames, loop=%s", len(frames), loop)
+        await self._play_gif_frames(frames, loop)
 
     async def async_stop(self) -> None:
         """Stop current playback and clear the screen."""
